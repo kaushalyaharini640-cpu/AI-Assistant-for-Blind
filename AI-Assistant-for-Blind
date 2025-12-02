@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Vision Assistant</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for accessibility and theme */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117; /* Dark background */
+            color: #c9d1d9; /* Light text */
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+        .container {
+            max-width: 90%;
+            width: 500px;
+        }
+        .primary-button {
+            background-color: #238636;
+            color: white;
+            padding: 1rem 2rem;
+            border-radius: 0.5rem;
+            font-size: 1.25rem;
+            font-weight: bold;
+            transition: background-color 0.2s;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .primary-button:hover:not(:disabled) {
+            background-color: #2ea043;
+        }
+        .primary-button:disabled {
+            background-color: #2d333b;
+            cursor: not-allowed;
+            color: #8b949e;
+        }
+        #cameraFeed {
+            width: 100%;
+            height: auto;
+            border-radius: 0.75rem;
+            object-fit: cover;
+            background-color: #161b22;
+        }
+    </style>
+</head>
+<body class="p-4">
+
+    <div class="container space-y-6">
+        <h1 class="text-3xl font-extrabold text-center text-green-400 mb-8">
+            Voice-Activated Vision
+        </h1>
+
+        <!-- Camera Feed (Hidden until activated) -->
+        <div id="cameraContainer" class="relative overflow-hidden rounded-xl shadow-2xl hidden">
+            <video id="cameraFeed" autoplay playsinline class="w-full h-auto"></video>
+            <div id="cameraStatus" class="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center text-xl font-bold text-white transition-opacity duration-300">
+                Camera OFF
+            </div>
+            <!-- Canvas for capturing the frame (hidden) -->
+            <canvas id="cameraCanvas" class="hidden"></canvas>
+        </div>
+
+        <!-- Microphone Button to start listening for commands -->
+        <div class="flex justify-center">
+            <button id="micButton" class="primary-button flex items-center space-x-2">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-6 h-6">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5a6 6 0 0 0-6-6v0a6 6 0 0 0-6 6v1.5a6 6 0 0 0 6 6Z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6.75V4.5a2.25 2.25 0 1 0-4.5 0v2.25m6.75 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1-.75-.75V8.25m0-1.5V4.5a2.25 2.25 0 1 0-4.5 0v2.25m6.75 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1-.75-.75V8.25" />
+                </svg>
+                <span id="micText">Press & Speak Command</span>
+            </button>
+        </div>
+
+        <!-- Status Message Log -->
+        <div id="statusLog" class="p-4 bg-gray-800 rounded-lg text-sm h-32 overflow-y-auto">
+            <p class="font-bold mb-1 text-yellow-400">STATUS:</p>
+            <p>Ready. Press the button and say "Turn on the camera" or ask a general question.</p>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration and State Variables ---
+        const apiKey = ""; // API Key is automatically provided by the runtime
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+        
+        // UI Elements
+        const micButton = document.getElementById('micButton');
+        const micText = document.getElementById('micText');
+        const cameraFeed = document.getElementById('cameraFeed');
+        const cameraContainer = document.getElementById('cameraContainer');
+        const cameraCanvas = document.getElementById('cameraCanvas');
+        const cameraStatus = document.getElementById('cameraStatus');
+        const statusLog = document.getElementById('statusLog');
+
+        let isCameraOn = false;
+        let videoStream = null;
+        let isProcessing = false;
+
+        // --- Core Utility Functions ---
+
+        /**
+         * Logs a message to the UI status log and console.
+         * @param {string} message - The message to log.
+         * @param {boolean} isUser - If the message is a user command.
+         */
+        function logStatus(message, isUser = false) {
+            const p = document.createElement('p');
+            p.className = isUser ? 'text-green-300' : 'text-gray-400';
+            p.textContent = (isUser ? 'YOU: ' : 'SYSTEM: ') + message;
+            statusLog.appendChild(p);
+            // Keep the log scrolled to the bottom
+            statusLog.scrollTop = statusLog.scrollHeight;
+            console.log(p.textContent);
+        }
+
+        /**
+         * Uses the browser's Text-to-Speech (TTS) engine to speak a message.
+         * @param {string} text - The text to speak.
+         */
+        function speak(text) {
+            if (!('speechSynthesis' in window)) {
+                logStatus("Speech synthesis not supported in this browser.", false);
+                return;
+            }
+            // Stop any ongoing speech to prioritize the new message
+            window.speechSynthesis.cancel(); 
+
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.rate = 1.0; // Normal speed
+            utterance.pitch = 1.0; // Normal pitch
+            
+            // Optional: Choose a more natural voice if available
+            const voices = window.speechSynthesis.getVoices();
+            const preferredVoice = voices.find(v => v.lang.includes('en') && (v.name.includes('Google') || v.default));
+            if (preferredVoice) {
+                utterance.voice = preferredVoice;
+            }
+
+            window.speechSynthesis.speak(utterance);
+            logStatus(`Speaking: "${text}"`, false);
+        }
+        
+        // --- Camera Control Functions ---
+
+        /**
+         * Turns the camera on and starts streaming video.
+         */
+        async function turnOnCamera() {
+            if (isCameraOn || isProcessing) return;
+
+            speak("Attempting to turn on the camera setting.");
+            logStatus("Requesting camera access...");
+            
+            try {
+                // Request access to the user's video camera
+                videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                
+                // Attach the stream to the video element
+                cameraFeed.srcObject = videoStream;
+                await cameraFeed.play();
+                
+                // Update state and UI
+                isCameraOn = true;
+                cameraContainer.classList.remove('hidden');
+                cameraStatus.textContent = "Camera ON. Say 'Take photo' to capture or 'Turn off camera'.";
+                logStatus("Camera is ON and streaming.");
+                
+                // Updated confirmation to simulate 'setting' confirmation
+                speak("I've successfully turned on the camera setting. The video feed is now active.");
+
+            } catch (error) {
+                logStatus(`Error accessing camera: ${error.message}. Please ensure permissions are granted.`, false);
+                speak("I could not access the camera. Please check your permissions.");
+                // Ensure stream is null if failed
+                videoStream = null;
+            }
+        }
+
+        /**
+         * Turns the camera off and stops the video stream.
+         */
+        function turnOffCamera() {
+            if (videoStream) {
+                // Stop all tracks (video) in the stream
+                videoStream.getTracks().forEach(track => track.stop());
+                videoStream = null;
+            }
+            isCameraOn = false;
+            cameraContainer.classList.add('hidden');
+            cameraStatus.textContent = "Camera OFF";
+            logStatus("Camera turned OFF.");
+            speak("I've turned off the camera setting.");
+        }
+
+        // --- AI Call Logic (Unified for Text and Vision) ---
+
+        /**
+         * Captures a frame from the video feed and converts it to a Base64 string.
+         * @returns {string | null} The base64 data URL of the image, or null on failure.
+         */
+        function captureFrameToBase64() {
+            if (!isCameraOn || cameraFeed.paused || cameraFeed.ended) {
+                logStatus("Cannot capture photo: Camera is not streaming.", false);
+                return null;
+            }
+
+            // Set canvas size to match the video element's actual dimensions
+            cameraCanvas.width = cameraFeed.videoWidth;
+            cameraCanvas.height = cameraFeed.videoHeight;
+
+            const ctx = cameraCanvas.getContext('2d');
+            // Draw the current frame of the video onto the canvas
+            ctx.drawImage(cameraFeed, 0, 0, cameraCanvas.width, cameraCanvas.height);
+
+            // Export the canvas content as a JPEG image data URL (Base64)
+            // We strip the mime type prefix to get just the Base64 data
+            const dataUrl = cameraCanvas.toDataURL('image/jpeg', 0.9);
+            return dataUrl.split(',')[1];
+        }
+
+        /**
+         * Calls the Gemini API for either text-only or multimodal analysis.
+         * @param {string} userQuery - The question or analysis request.
+         * @param {string} systemPrompt - The instruction for the AI model.
+         * @param {string | null} base64Image - Optional base64-encoded image data.
+         * @returns {Promise<string>} The generated text response.
+         */
+        async function callGeminiAPI(userQuery, systemPrompt, base64Image = null) {
+            
+            // Build the contents array dynamically
+            const parts = [
+                { text: userQuery }
+            ];
+            
+            if (base64Image) {
+                parts.push({
+                    inlineData: {
+                        mimeType: "image/jpeg",
+                        data: base64Image
+                    }
+                });
+            }
+
+            const payload = {
+                contents: [{ parts }],
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                }
+            };
+
+            let resultText = "I encountered an issue analyzing the image or answering the question.";
+            let attempt = 0;
+            const maxRetries = 3;
+            let delay = 1000; // 1 second
+
+            while (attempt < maxRetries) {
+                try {
+                    const response = await fetch(API_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+
+                    const result = await response.json();
+                    
+                    const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                    if (text) {
+                        return text.trim(); // Success, return text
+                    } else {
+                        throw new Error("API response was missing text content.");
+                    }
+
+                } catch (error) {
+                    logStatus(`API attempt ${attempt + 1} failed: ${error.message}.`, false);
+                    attempt++;
+                    if (attempt < maxRetries) {
+                        logStatus(`Retrying in ${delay / 1000} seconds...`, false);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        delay *= 2; // Exponential backoff
+                    }
+                }
+            }
+
+            return resultText; // Return error message after retries
+        }
+
+
+        /**
+         * Coordinates the capture, analysis, and speech feedback sequence.
+         */
+        async function captureAndAnalyze() {
+            if (!isCameraOn) {
+                speak("The camera is off. Say, 'Turn on the camera' first.");
+                return;
+            }
+            if (isProcessing) {
+                speak("I'm already processing a request. Please wait a moment.");
+                return;
+            }
+
+            isProcessing = true;
+            micButton.disabled = true;
+            micText.textContent = 'Processing...';
+            speak("I am taking a photo now.");
+            logStatus("Photo captured. Starting analysis...");
+            cameraStatus.textContent = "Processing Image...";
+
+            try {
+                const base64Image = captureFrameToBase64();
+                if (!base64Image) {
+                    throw new Error("Failed to capture image frame.");
+                }
+
+                const systemPrompt = "You are a helpful vision assistant for a blind person. Describe the captured image concisely, clearly, and informatively. Focus on objects, text, people, and the general scene. Start your description immediately without introductory phrases.";
+                const description = await callGeminiAPI("Describe this image in detail.", systemPrompt, base64Image);
+                
+                logStatus("Analysis Complete. Description received.", false);
+                speak(description);
+                
+                cameraStatus.textContent = "Analysis complete. Say 'Take photo' again or 'Turn off camera'.";
+
+            } catch (error) {
+                logStatus(`Fatal Error in Analysis: ${error.message}`, false);
+                speak("I ran into a serious error during analysis. Please try again.");
+                cameraStatus.textContent = "Error occurred. Ready for next command.";
+            } finally {
+                isProcessing = false;
+                micButton.disabled = false;
+                micText.textContent = 'Press & Speak Command';
+            }
+        }
+
+        /**
+         * Handles non-camera-related questions using the AI model.
+         * @param {string} question - The user's question.
+         */
+        async function answerGeneralQuestion(question) {
+            if (isProcessing) {
+                speak("I am currently processing. Please wait.");
+                return;
+            }
+            isProcessing = true;
+            micButton.disabled = true;
+            micText.textContent = 'Thinking...';
+            
+            logStatus("Answering general question...");
+            speak("I am processing your question. Please wait.");
+
+            try {
+                const systemPrompt = "You are a friendly and informative voice assistant. Answer the user's question concisely and clearly in a single paragraph. Do not use markdown formatting or introductory phrases like 'The answer is' or 'Here is the answer'.";
+                
+                const answer = await callGeminiAPI(question, systemPrompt);
+                
+                logStatus(`Answer received: ${answer}`, false);
+                speak(answer);
+
+            } catch (error) {
+                logStatus(`Error answering question: ${error.message}`, false);
+                speak("I'm sorry, I ran into an error trying to answer that question.");
+            } finally {
+                isProcessing = false;
+                micButton.disabled = false;
+                micText.textContent = 'Press & Speak Command';
+            }
+        }
+
+        // --- Speech Recognition Handler ---
+
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        let recognition = null;
+        
+        if (SpeechRecognition) {
+            recognition = new SpeechRecognition();
+            recognition.continuous = false; // Capture a single phrase
+            recognition.lang = 'en-US';
+            recognition.interimResults = false;
+            recognition.maxAlternatives = 1;
+
+            recognition.onstart = () => {
+                micButton.classList.add('bg-red-600', 'animate-pulse');
+                micButton.classList.remove('bg-green-600');
+                micText.textContent = 'Listening... Speak Now!';
+            };
+
+            recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript.toLowerCase().trim();
+                logStatus(transcript, true);
+                handleCommand(transcript);
+            };
+
+            recognition.onend = () => {
+                micButton.classList.remove('bg-red-600', 'animate-pulse');
+                micButton.classList.add('bg-green-600');
+                micText.textContent = 'Press & Speak Command';
+            };
+
+            recognition.onerror = (event) => {
+                logStatus(`Speech recognition error: ${event.error}`, false);
+                speak("I didn't quite catch that. Please press the button and speak again.");
+            };
+
+            micButton.onclick = () => {
+                if (isProcessing) {
+                    speak("I am currently processing. Please wait.");
+                    return;
+                }
+                try {
+                    recognition.start();
+                } catch (e) {
+                    // Prevent 'recognition already started' error
+                    console.warn(e);
+                    logStatus("Recognition is already active or a system error occurred.", false);
+                }
+            };
+
+        } else {
+            micButton.disabled = true;
+            micText.textContent = 'Voice Not Supported';
+            logStatus("Browser does not support Web Speech Recognition API.", false);
+        }
+
+        /**
+         * Processes the user's voice command or general question.
+         * @param {string} command - The recognized voice command.
+         */
+        function handleCommand(command) {
+            const knownCommands = [
+                "turn on camera", "start camera", "on camera",
+                "turn off camera", "stop camera", "off camera",
+                "take photo", "capture image", "analyze"
+            ];
+
+            // Check for direct camera/analysis commands first
+            if (command.includes("turn on camera") || command.includes("start camera") || command.includes("on camera")) {
+                turnOnCamera();
+            } else if (command.includes("turn off camera") || command.includes("stop camera") || command.includes("off camera")) {
+                turnOffCamera();
+            } else if (command.includes("take photo") || command.includes("capture image") || command.includes("analyze")) {
+                captureAndAnalyze();
+            } else if (command.includes("help") || command.includes("commands")) {
+                speak("I can understand three commands: 'Turn on the camera', 'Turn off the camera', and 'Take photo'. I can also answer general knowledge questions.");
+                logStatus("Available commands: 'Turn on the camera', 'Turn off the camera', 'Take photo'. General questions are also supported.");
+            } else {
+                // If it's not a known command, treat it as a general question
+                answerGeneralQuestion(command);
+            }
+        }
+
+        // --- Initialization ---
+        window.onload = () => {
+             // Initial style cleanup
+            micButton.classList.remove('bg-green-600'); 
+            micButton.classList.add('bg-red-500'); // Initial state is a red button before recognition starts
+            micText.textContent = 'Press & Speak Command';
+            speak("Vision assistant ready. Press the button and say, 'Help' for instructions, or ask me anything.");
+        }
+
+    </script>
+</body>
